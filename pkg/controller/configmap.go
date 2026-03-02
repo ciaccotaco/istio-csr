@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -79,6 +81,13 @@ type configmap struct {
 
 	// namespaceSelector filters the namespace to creates the istio-ca-root-cert ConfigMap
 	namespaceSelector labels.Selector
+
+	// rootCAsPEM caches the latest Root CA bundle PEM.
+	// It is populated on RootCA events and read by reconcile.
+	rootCAsPEM string
+
+	// rootCAsMu protects access to rootCAsPEM
+	rootCAsMu sync.RWMutex
 }
 
 func AddConfigMapController(ctx context.Context, log logr.Logger, opts Options) error {
@@ -123,7 +132,19 @@ func AddConfigMapController(ctx context.Context, log logr.Logger, opts Options) 
 
 		// If the CA roots change then reconcile all ConfigMaps
 		WatchesRawSource(source.Channel(c.tls.SubscribeRootCAsEvent(), handler.EnqueueRequestsFromMapFunc(
-			func(context.Context, client.Object) []reconcile.Request {
+			func(ctx context.Context, _ client.Object) []reconcile.Request {
+
+				// Compute RootCAs once per event
+				rootCAs := c.tls.RootCAs(ctx)
+				if rootCAs == nil {
+					c.log.Error(nil, "failed to load RootCAs")
+					return nil
+				}
+
+				c.rootCAsMu.Lock()
+				c.rootCAsPEM = string(rootCAs.PEM)
+				c.rootCAsMu.Unlock()
+
 				var namespaceList corev1.NamespaceList
 				if err := c.lister.List(ctx, &namespaceList); err != nil {
 					c.log.Error(err, "failed to list namespaces, exiting...")
@@ -131,6 +152,11 @@ func AddConfigMapController(ctx context.Context, log logr.Logger, opts Options) 
 				}
 				var requests []reconcile.Request
 				for _, namespace := range namespaceList.Items {
+					// Skip namespaces if they do not match the namespace selector
+					if !c.namespaceSelector.Matches(labels.Set(namespace.GetLabels())) {
+						continue
+					}
+
 					requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: namespace.Name, Name: configMapNameIstioRoot}})
 				}
 				return requests
@@ -172,12 +198,14 @@ func (c *configmap) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 		return ctrl.Result{}, nil
 	}
 
-	rootCAs := c.tls.RootCAs(ctx)
-	if rootCAs == nil {
-		return ctrl.Result{}, fmt.Errorf("could not get root certificates: %w", ctx.Err())
-	}
+	c.rootCAsMu.RLock()
+	rootCAsPEM := c.rootCAsPEM
+	c.rootCAsMu.RUnlock()
 
-	rootCAsPEM := string(rootCAs.PEM)
+	if rootCAsPEM == "" {
+		log.V(2).Info("RootCAs cache not ready, requeuing")
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+	}
 
 	// Check ConfigMap exists, and has the correct data.
 	var configMap corev1.ConfigMap
