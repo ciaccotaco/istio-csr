@@ -82,6 +82,10 @@ type OptionsController struct {
 	// if the Kubernetes API server supports
 	// [API Priority and Fairness](https://kubernetes.io/docs/concepts/cluster-administration/flow-control/).
 	DisableKubernetesClientRateLimiter bool
+
+	// MaxConcurrentReconciles is the maximum number of concurrent reconciles
+	// that the controller executes with
+	MaxConcurrentReconciles int
 }
 
 func New() *Options {
@@ -329,4 +333,8 @@ func (o *Options) addControllerFlags(fs *pflag.FlagSet) {
 		"disable-kubernetes-client-rate-limiter", false,
 		"Allows the default client-go rate limiter to be disabled if the Kubernetes API server supports "+
 			"[API Priority and Fairness](https://kubernetes.io/docs/concepts/cluster-administration/flow-control/)")
+
+	fs.IntVar(&o.Controller.MaxConcurrentReconciles,
+		"max-concurrent-reconciles", 1,
+		"Maximum number of concurrent reconciles that the controller executes with.")
 }

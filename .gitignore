@@ -1,3 +1,6 @@
+TODO: REMOVE
+vendor/**
+
 /bin
 /_bin
 /kubeconfig.yaml
